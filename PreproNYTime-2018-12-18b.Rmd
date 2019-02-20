@@ -1,0 +1,337 @@
+---
+title: "PreproNYTime2006"
+author: "Jean-Francois Chartier"
+date: "6 décembre 2018"
+output: 
+  html_document:
+    number_sections: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, cache.lazy = FALSE)
+```
+
+#Get Data
+##get documents
+```{r}
+library(xml2)
+library(magrittr)
+nyXML=xml2::read_xml("dataForTest.xml", encoding="ANSI")
+
+#nyXML=xml2::read_xml("nytCorpus2003-2005LemmatiseAntidictionnaireFiltreToutSaufNomAdjectifVerbeUTF8_formatJFC.xml", encoding="ANSI")
+#xml_name(nyXML)
+all.docs.nodes=xml_find_all(nyXML, ".//document")
+
+```
+
+##get authors
+all unique authors
+id rows are used as id authors
+```{r}
+#important de concat author names
+#
+authorFrequency=xml2::xml_find_all(all.docs.nodes, ".//auteur")%>%xml_text(.)%>%table(.)%>%as.data.frame(., stringsAsFactors=F)%>% set_colnames(., c("author.name", "frequency"))
+
+authorFrequency$idAuthor=1:length(authorFrequency$author.name)
+
+#uniqueAuthors=authorFrequency$author.name
+
+#old script
+#uniqueAuthors=xml2::xml_find_all(all.docs.nodes, ".//auteur")%>%xml_text(.) %>%unique(.)
+saveRDS(authorFrequency, "authorFrequency.rds")
+```
+
+##get id authors by document
+```{r}
+#replace author's name by id
+allIdAuthorsByDoc=sapply(all.docs.nodes, FUN = function(x){
+  #x=all.docs.nodes[[12]]
+  authors_i= xml2::xml_find_all(x, ".//auteur")
+  #print(length(authors_i))
+  
+  if (length(authors_i)==0){
+    idsAuthorsOfDoc=list()
+  } else if(length(authors_i)>1){
+    #print(" here1")
+    idsAuthorsOfDoc=vector(mode = "list", length = length(authors_i))
+    for (i in 1:length(authors_i)){
+      idToSlect_i=authorFrequency$author.name==xml_text(authors_i[i])
+      idsAuthorsOfDoc[i]=authorFrequency$idAuthor[idToSlect_i]
+      #old call    
+      #idsAuthorsOfDoc[i]=authorFrequency$author.name==xml_text(authors_i[i])%>%subset(authorFrequency$idAuthor, subset = .)
+    }
+  } else {
+      #print("here2")
+      #print(xml_text(authors_i))
+      idsAuthorsOfDoc=vector(mode = "list", length = length(authors_i))
+      #old call
+      #idsAuthorsOfDoc[1]=list(which(uniqueAuthors==xml_text(authors_i)))
+      idToSlect=authorFrequency$author.name==xml_text(authors_i)
+      idsAuthorsOfDoc[1]=list(authorFrequency$idAuthor[idToSlect])
+  }
+  
+})
+
+```
+
+
+##get info from documents
+```{r}
+
+allSeg=lapply(all.docs.nodes, FUN = function(x){
+  seg_i = x %>% xml2::xml_find_first(., ".//segment")%>%xml_text(.)
+})%>%unlist(.)
+
+allDate=lapply(all.docs.nodes, FUN = function(x){
+  date_i= x %>% xml2::xml_find_first(., ".//date")%>%xml_integer(.)
+})%>%unlist(.)
+
+df.docs=data.frame(segment = allSeg, date =  allDate, stringsAsFactors = F)
+df.docs$idAuthors=allIdAuthorsByDoc
+```
+
+#Preprocessing data
+
+##cleaning corpus
+```{r}
+library(stringr)
+# tokenisation selon quanteda
+preprocesCorpus=stringr::str_replace_all(df.docs$segment,"[\r\n]" , "")
+#remove all non graphical caracther
+preprocesCorpus=stringr::str_replace_all(preprocesCorpus,"[^[:graph:]]", " ")
+#remove whitespace
+preprocesCorpus=stringr::str_squish(preprocesCorpus)
+```
+
+
+##Tokinization and word filtering
+```{r}
+library(quanteda)
+
+preprocesCorpus=quanteda::tokens(x=preprocesCorpus,what="word", remove_punct = TRUE, remove_numbers = TRUE, remove_separators = TRUE,remove_hyphens = TRUE, remove_symbols=TRUE, remove_url = TRUE)
+
+preprocesCorpus=quanteda::tokens_tolower(preprocesCorpus)
+
+#myStopWords=unique(c(stopwords("en", source = "smart"), c("yes", "no", "thing", "can", "okay", "ok", "just", "good", "like", "something", "one", "moment", "say", "go", "speeches", "pages", "online", "default.aspx", "www.bankofengland.co.uk")))
+
+myStopWords=unique(c(stopwords("en", source = "smart")))
+
+# filtrer selon un antidictionnaire et singleton
+preprocesCorpus=quanteda::tokens_remove(preprocesCorpus, case_insensitive = F, valuetype = "glob", pattern=myStopWords, min_nchar=3)
+
+#lemmatization
+#no need to lemmatize, the corpus was already lemmatized
+#preprocesCorpus=sapply(preprocesCorpus, FUN = function(seg)  paste0(textstem::lemmatize_words(seg), collapse = " "))
+#preprocesCorpus=quanteda::tokens(preprocesCorpus)
+
+print(c("corpus size after preprocessing : " , length(paste(unlist(preprocesCorpus)))))
+
+print(c("vocabulary size after preprocessing : ", length(unique(paste(unlist(preprocesCorpus))) )))
+
+df.docs$tokens=preprocesCorpus
+```
+
+
+#Modeling 
+##vectorization of documents
+```{r ,cache=T}
+#Vectorize documents 
+myNyTimeMatrix = quanteda::dfm(x=df.docs$tokens, tolower=FALSE)
+
+#set filter
+minDocFreq = 2
+maxDocFreq = length(myNyTimeMatrix)*.66
+
+#filter to rare and to frequent words and ngrams 
+myNyTimeMatrix<-quanteda::dfm_trim(x=myNyTimeMatrix, min_docfreq = minDocFreq, max_docfreq = maxDocFreq, docfreq_type="count")
+
+# imprimer nombre de dimensions de la matrice
+print(paste("nombre de mots differents apres filtrage base sur la frequence documentaire : ", length(myNyTimeMatrix@Dimnames$features)))
+
+saveRDS(myNyTimeMatrix, "myNyTimeTrainningMatrix.rds")
+
+```
+
+##filter empty documents
+
+```{r}
+nonEmptyVectors = apply(X = as.matrix(myNyTimeMatrix), MARGIN = 1, FUN = function(x) sqrt(sum(x^2))>0)
+myNyTimeMatrix=myNyTimeMatrix[nonEmptyVectors]
+df.docs=df.docs[nonEmptyVectors, ]
+
+```
+##LDA based topic modeling of documents
+```{r}
+library(topicmodels)
+burnin <- 100
+iter <- 1000
+thin <- 500
+seed <-123 # keep fixed, to garantee reproductibility
+nstart <- 1
+best <- TRUE
+k<-200 # number of topics
+
+#convert quanteda format to tm format
+dtm_matrix = quanteda::as.DocumentTermMatrix(myNyTimeMatrix)
+#launch topic modeling
+topics<-topicmodels::LDA(dtm_matrix, k, method="Gibbs", control=list(nstart=nstart, seed = seed, best=best, burnin = burnin, iter = iter, thin=thin))
+
+```
+
+##save topic model
+```{r}
+saveRDS(topics, "trainTopicModelNyTimes.rds")
+```
+
+
+#Journalists' semantic preferences
+
+##filter out document wihout author
+```{r}
+numberAuthors=sapply(df.docs$idAuthors, FUN = function(x) length(x))
+df.docs=df.docs[numberAuthors>0,]
+```
+
+##aggregate to journalist*word matrix
+```{r}
+
+docAuthorAdjencency = quanteda::dfm(x=df.docs$idAuthors %>% as.tokens(.), tolower=FALSE)
+
+authorWordTFMatrix=matrix(nrow = ncol(docAuthorAdjencency), ncol = ncol(myNyTimeMatrix))
+#rownames are id authors 
+# important here to select from docAuthorAdjencency, because after filtering empty segment, we have authors in the corpus who are never instanciated in the matrix 
+rownames(authorWordTFMatrix)=colnames(docAuthorAdjencency)
+for (j in 1: ncol(docAuthorAdjencency)){
+  idDocs=which((docAuthorAdjencency)[,j]%>%as.matrix()>0)
+  myNyTimeMatrix[idDocs,] %>% colSums(.)->authorWordTFMatrix[j,]
+}
+
+```
+
+##Topic a posteriori of journalists
+```{r}
+posteriorForAuthors=topicmodels::posterior(topics, newdata = authorWordTFMatrix)
+saveRDS(posteriorForAuthors, "posteriorTopicsForAuthors.rds")
+```
+
+
+#Compute relation between journalist
+
+## get author cooccurrence matrix
+the number of time 2 authors co-wrote an article
+```{r}
+authorAuthorMatrix=(t(docAuthorAdjencency)) %*% docAuthorAdjencency
+
+#to retrive relation between 2 authors you need to used @dimnames
+#which(authorAuthorMatrix@Dimnames[[1]]==1)
+
+authorCoSignature=as.matrix(authorAuthorMatrix)%>%reshape2::melt(., value.name="co.writting.frequency")
+
+```
+
+##semantic similarity relation between authors
+```{r}
+library(proxy)
+
+authorByAuthorSemSim=proxy::simil(authorWordTFMatrix, by_rows = T, method = "cosine")%>%as.matrix(.)%>%reshape2::melt(., value.name="semantic.similarity")
+
+```
+
+
+## social structural equivalence
+```{r}
+authorByAuthorSocialEqui=proxy::simil(as.matrix(authorAuthorMatrix), by_rows = T, method = "cosine")%>%as.matrix(.)%>%reshape2::melt(., value.name="structural.equivalence")
+```
+
+##Build igraph structure
+```{r}
+library(igraph)
+#library(network)
+#library(intergraph) # used to encode object from one igraph to network
+
+graphOFAuthors= igraph::graph_from_adjacency_matrix(authorAuthorMatrix, mode = "undirected", diag = F)
+```
+
+
+## get social proximity relation
+define social proximity betwwen 2 nodes as the shortest path divided by the graph diameter
+```{r}
+
+distBetweenAuthors=distances(graph = graphOFAuthors)
+
+#because the minimal possible distance is 1, we obtain a normalized proximity by 1/geodesic.length
+socialProxAuthor=1/distBetweenAuthors
+#replace the diagonal with 0, 
+socialProxAuthor[is.infinite(socialProxAuthor)]=0
+socialProxAuthor=socialProxAuthor%>%reshape2::melt(., value.name="social.proximity")
+#plot(graphOFAuthors)
+```
+
+##get assortativity
+not sure if relevant. The hypothesis here is that agents with similair degree (>0) in a network should influence eauch other more than people with different positions  
+```{r}
+
+```
+
+
+##save relation dataframe
+```{r}
+
+colnames(socialProxAuthor)=c("idAuthor.1", "idAuthor.2", names(socialProxAuthor)[3])
+
+
+relationsBetweenAuthors=cbind(socialProxAuthor, structural.equivalence=authorByAuthorSocialEqui$structural.equivalence, semantic.similarity=authorByAuthorSemSim$semantic.similarity, co.writting.frequency=authorCoSignature$co.writting.frequency)
+
+saveRDS(relationsBetweenAuthors, "relationsBetweenAuthors.rds")
+```
+
+
+#Compute centralities
+
+##Degree centrality
+```{r}
+#degreeCentrality=authorAuthorMatrix%>%rowMeans()
+#names(degreeCentrality)=authorAuthorMatrix@Dimnames[[1]]
+
+#use igraph function for consistency
+degreeCentrality=degree(graphOFAuthors, mode = "all", normalized = T)
+
+```
+
+##Closeness centrality
+as the mean of social proximities
+```{r}
+# noes not work because the graph is disconnected. Use instead rowmeans from proximity matrix
+#closeCentrality=closeness(graphOFAuthors, mode = "all")
+
+#be sure that socialProxAuthor has no infinite values
+proxA=(1/distBetweenAuthors)
+proxA[is.infinite(proxA)]=0
+
+closeCentrality=rowMeans(proxA)
+
+```
+
+## betweenness centrality
+```{r}
+betweennessCentrality=betweenness(graphOFAuthors, directed = F, normalized = T)
+```
+
+##save centrality df
+```{r}
+n=nrow(authorAuthorMatrix)
+centralityAuthors= data.frame(idAuthor=names(degreeCentrality), degree.centrality=degreeCentrality, closeness.centrality=closeCentrality, betweenness.centrality=betweennessCentrality)
+
+saveRDS(centralityAuthors, "centralityAuthors.rds")
+```
+
+#Save Corpus Info Data Frame
+```{r}
+saveRDS(df.docs, "nyTimeCorpusInfoDataFrame-2018-12-10.rds")
+```
+
+
+

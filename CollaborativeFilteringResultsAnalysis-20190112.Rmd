@@ -1,0 +1,604 @@
+---
+title: "CollaborativeFilteringResultsAnalysis"
+author: "Jean-Francois Chartier"
+date: "3 janvier 2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#install packages
+```{r}
+if ("quanteda" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(quanteda)
+if ("magrittr" %in% installed.packages()==FALSE){
+  install.packages('magrittr',dependencies = TRUE)
+}
+library(magrittr)
+if ("topicmodels" %in% installed.packages()==FALSE){
+  install.packages('topicmodels',dependencies = TRUE)
+}
+library(topicmodels)
+if ("data.table" %in% installed.packages()==FALSE){
+  install.packages('data.table',dependencies = TRUE)
+}
+library(data.table)
+if ("ranger" %in% installed.packages()==FALSE){
+  install.packages('ranger',dependencies = TRUE)
+}
+library(ranger)
+if ("caret" %in% installed.packages()==FALSE){
+  install.packages('caret',dependencies = TRUE)
+}
+library(caret)
+if ("rpart" %in% installed.packages()==FALSE){
+  install.packages('rpart',dependencies = TRUE)
+}
+library(rpart)
+if ("corrplot" %in% installed.packages()==FALSE){
+  install.packages('corrplot',dependencies = TRUE)
+}
+library(corrplot)
+if ("kernlab" %in% installed.packages()==FALSE){
+  install.packages('kernlab',dependencies = TRUE)
+}
+library(kernlab)
+
+
+```
+
+
+
+
+
+
+#Regression for past-prediction
+matrix completion validation method
+
+##non-avg CF
+```{r}
+finalResultsFromCF=readRDS("non.averaged.topic.predictions.for.authors.in.trainset.woth.rank.20190107.rds")
+
+#finalResultsFromCF.casted=dcast(finalResultsFromCF[1:10000,], idAuthor.1+rank+topic+past.observed.topic ~ relation, value.var = 'topic.value')%>%as.data.frame(.)
+
+finalResultsFromCF.casted=dcast(finalResultsFromCF, idAuthor.1+topic+past.observed.topic ~ relation+rank, value.var = 'topic.value')%>%as.data.frame(.)
+
+```
+###read 2006 dataset
+```{r}
+#2006 dataset
+finalResultsFromCFOnTestSet=readRDS("non.averaged.topic.predictions.for.authors.in.testset.woth.rank.20190107.rds")
+
+finalResultsFromCFOnTestSet.casted=dcast(finalResultsFromCFOnTestSet, idAuthor.1+topic+future.observed.topic ~ relation+rank, value.var = 'topic.value')%>%as.data.frame(.)
+
+```
+
+
+###topic mean as baseline
+```{r}
+topic.avg.by.author=dcast(finalResultsFromCF, idAuthor.1 ~ topic, value.var = 'past.observed.topic', fun=mean)#%>%as.data.frame(.)
+topic.avg=colMeans(topic.avg.by.author[,2:ncol(topic.avg.by.author)])%>%set_names(colnames(topic.avg.by.author)[2:ncol(topic.avg.by.author)])
+
+avg.topic.baseline=lapply(finalResultsFromCF.casted$topic, function(t){
+  topic.avg[t]
+})%>%unlist(.)
+
+finalResultsFromCF.casted=cbind(finalResultsFromCF.casted, avg.topic.baseline)
+
+```
+
+
+###split data 
+```{r}
+library(caret)
+set.seed(666)
+#table(dataForReg$hardAgreement)
+traningRows=caret::createDataPartition(y = finalResultsFromCF.casted$past.observed.topic, p = .66, list = F)
+trainingSet=finalResultsFromCF.casted[traningRows,]
+testSet=finalResultsFromCF.casted[-traningRows,]
+
+```
+
+
+###used all 2003-2005 dataset as trainner
+```{r}
+trainingSet=finalResultsFromCF.casted
+```
+
+##semantic-based only
+```{r}
+#prepare data
+testSet$idAuthor.1=NULL
+testSet$topic=NULL
+testSet$avg.topic.baseline=NULL
+trainingSet$idAuthor.1=NULL
+trainingSet$topic=NULL
+trainingSet$avg.topic.baseline=NULL
+#trainingSet=scale(trainingSet, center = T, scale = T)%>%as.data.frame(.)
+#testSet=scale(testSet, center = T, scale = T)%>%as.data.frame(.)
+
+trainingSet=trainingSet[,c(1,22:31)]
+testSet=testSet[,c(1,22:31)]
+
+#linear regression
+my_lm = caret::train(past.observed.topic ~ ., data = trainingSet, method= "lm")
+#eval on test set
+lr.pred.test=predict(my_lm, newdata = testSet)
+linear.reg.R2=R2(lr.pred.test, testSet$past.observed.topic)
+linear.reg.cor=cor(lr.pred.test, testSet$past.observed.topic)
+linear.reg.RMSE=RMSE(lr.pred.test, testSet$past.observed.topic)
+#plot(lr.pred.test, testSet$past.observed.topic)
+
+#regression tree
+rpartTree <- rpart(past.observed.topic ~ ., data = trainingSet)
+#eval on test set
+rpart.predict.test=predict(rpartTree, newdata = testSet)
+rpart.R2=R2(rpart.predict.test, testSet$past.observed.topic)
+rpart.cor=cor(rpart.predict.test, testSet$past.observed.topic)
+rpart.RMSE=RMSE(rpart.predict.test, testSet$past.observed.topic)
+#plot(rpart.predict.test, testSet$past.observed.topic)
+
+#random forest
+rf.model.no.avg=ranger::ranger(past.observed.topic ~ ., data=trainingSet, num.trees=1000, num.threads=7)#, importance="impurity")
+rf.pred=predict(rf.model.no.avg, data = testSet)
+rf.R2=R2(rf.pred$predictions, testSet$past.observed.topic)
+rf.cor=cor(rf.pred$predictions, testSet$past.observed.topic)
+rf.RMSE=RMSE(rf.pred$predictions, testSet$past.observed.topic)
+#plot(rf.pred$predictions, testSet$past.observed.topic)
+
+ml.semantic.feature=data.frame(correlation=c(linear.reg.cor,rpart.cor,rf.cor), RMSE=c(linear.reg.RMSE,rpart.RMSE,rf.RMSE))
+saveRDS(ml.semantic.feature, "semantic.feature.rds")
+```
+
+##social-based only
+```{r}
+#prepare data
+testSet$idAuthor.1=NULL
+testSet$topic=NULL
+testSet$avg.topic.baseline=NULL
+trainingSet$idAuthor.1=NULL
+trainingSet$topic=NULL
+trainingSet$avg.topic.baseline=NULL
+#trainingSet=scale(trainingSet, center = T, scale = T)%>%as.data.frame(.)
+#testSet=scale(testSet, center = T, scale = T)%>%as.data.frame(.)
+
+#select social features
+trainingSet=trainingSet[,-c(22:31)]
+testSet=testSet[,-c(22:31)]
+
+#linear regression
+my_lm.social = caret::train(past.observed.topic ~ ., data = trainingSet, method= "lm")
+#eval on test set
+lr.pred.test=predict(my_lm.social, newdata = testSet)
+linear.reg.R2=R2(lr.pred.test, testSet$past.observed.topic)
+linear.reg.cor=cor(lr.pred.test, testSet$past.observed.topic)
+linear.reg.RMSE=RMSE(lr.pred.test, testSet$past.observed.topic)
+#plot(lr.pred.test, testSet$past.observed.topic)
+
+#regression tree
+rpartTree.social <- rpart(past.observed.topic ~ ., data = trainingSet)
+#eval on test set
+rpart.predict.test=predict(rpartTree.social, newdata = testSet)
+rpart.R2=R2(rpart.predict.test, testSet$past.observed.topic)
+rpart.cor=cor(rpart.predict.test, testSet$past.observed.topic)
+rpart.RMSE=RMSE(rpart.predict.test, testSet$past.observed.topic)
+#plot(rpart.predict.test, testSet$past.observed.topic)
+
+#random forest
+rf.model.social=ranger::ranger(past.observed.topic ~ ., data=trainingSet, num.trees=1000, num.threads=7)#, importance="impurity")
+rf.pred=predict(rf.model.social, data = testSet)
+rf.R2=R2(rf.pred$predictions, testSet$past.observed.topic)
+rf.cor=cor(rf.pred$predictions, testSet$past.observed.topic)
+rf.RMSE=RMSE(rf.pred$predictions, testSet$past.observed.topic)
+#plot(rf.pred$predictions, testSet$past.observed.topic)
+
+ml.social.feature=data.frame(correlation=c(linear.reg.cor,rpart.cor,rf.cor), RMSE=c(linear.reg.RMSE,rpart.RMSE,rf.RMSE))
+saveRDS(ml.social.feature, "ml.social.feature.rds")
+```
+
+
+##Compare 4 models
+```{r}
+#change name one colum
+#finalResultsFromCF.casted$observed.topic=finalResultsFromCF.casted$past.observed.topic
+#finalResultsFromCF.casted$past.observed.topic=NULL
+
+#baseline
+baseline.R2=R2(testSet$avg.topic.baseline, testSet$past.observed.topic)
+baseline.cor=cor(testSet$avg.topic.baseline, testSet$past.observed.topic)
+baseline.RMSE=RMSE(testSet$avg.topic.baseline, testSet$past.observed.topic)
+#plot(testSet$avg.topic.baseline, testSet$past.observed.topic)
+
+#prepare data
+testSet$idAuthor.1=NULL
+testSet$topic=NULL
+testSet$avg.topic.baseline=NULL
+trainingSet$idAuthor.1=NULL
+trainingSet$topic=NULL
+trainingSet$avg.topic.baseline=NULL
+
+
+#scale
+#trainingSet=scale(trainingSet, center = T, scale = T)%>%as.data.frame(.)
+#testSet=scale(testSet, center = T, scale = T)%>%as.data.frame(.)
+
+#linear regression
+my_lm = caret::train(past.observed.topic ~ ., data = trainingSet, method= "lm")
+#eval on test set
+lr.pred.test=predict(my_lm, newdata = testSet)
+linear.reg.R2=R2(lr.pred.test, testSet$past.observed.topic)
+linear.reg.cor=cor(lr.pred.test, testSet$past.observed.topic)
+linear.reg.RMSE=RMSE(lr.pred.test, testSet$past.observed.topic)
+#plot(lr.pred.test, testSet$past.observed.topic)
+
+#regression tree
+rpartTree <- rpart(past.observed.topic ~ ., data = trainingSet)
+#eval on test set
+rpart.predict.test=predict(rpartTree, newdata = testSet)
+rpart.R2=R2(rpart.predict.test, testSet$past.observed.topic)
+rpart.cor=cor(rpart.predict.test, testSet$past.observed.topic)
+rpart.RMSE=RMSE(rpart.predict.test, testSet$past.observed.topic)
+#plot(rpart.predict.test, testSet$past.observed.topic)
+
+#random forest
+rf.model.no.avg=ranger::ranger(past.observed.topic ~ ., data=trainingSet, num.trees=1000, num.threads=7, importance="impurity")
+rf.pred=predict(rf.model.no.avg, data = testSet)
+rf.R2=R2(rf.pred$predictions, testSet$past.observed.topic)
+rf.cor=cor(rf.pred$predictions, testSet$past.observed.topic)
+rf.RMSE=RMSE(rf.pred$predictions, testSet$past.observed.topic)
+#plot(rf.pred$predictions, testSet$past.observed.topic)
+
+rf.model.2=ranger::ranger(past.observed.topic ~ ., data=trainingSet, num.trees=1000, num.threads=7, mtry = 2)
+rf2.pred=predict(rf.model.2, data = testSet)
+rf2.R2=R2(rf2.pred$predictions, testSet$past.observed.topic)
+rf2.cor=cor(rf2.pred$predictions, testSet$past.observed.topic)
+rf2.RMSE=RMSE(rf2.pred$predictions, testSet$past.observed.topic)
+
+#plot of rf
+axisRange <- extendrange(c(testSet$past.observed.topic, rf.pred$predictions))
+plot(y=rf.pred$predictions, x=testSet$past.observed.topic, xlab="observed preferences", ylab="predicted preferences", xlim=axisRange, ylim=axisRange)
+abline(0, 1, col = "darkgrey", lty = 2)
+
+residualValues.rf <-  testSet$past.observed.topic - rf.pred$predictions
+plot(x = rf.pred$predictions,  y=residualValues.rf, ylab  = "residual", xlab="predicted preferences")
+abline(h = 0,  col  = "darkgrey", lty = 2)
+
+
+
+#svm 
+#svm.model <- ksvm(past.observed.topic ~ ., data=trainingSet, kernel ="rbfdot", kpar = "automatic", C = 1, epsilon = 0.1)
+
+ml.all.feature=data.frame(correlation=c(linear.reg.cor,rpart.cor,rf.cor), RMSE=c(linear.reg.RMSE,rpart.RMSE,rf.RMSE))
+saveRDS(ml.all.feature, "ml.all.feature.rds")
+```
+
+###baseline prediction
+```{r}
+R2(trainingSet$avg.topic.baseline, trainingSet$past.observed.topic)
+cor(trainingSet$avg.topic.baseline, trainingSet$past.observed.topic)
+RMSE(trainingSet$avg.topic.baseline, trainingSet$past.observed.topic)
+plot(trainingSet$avg.topic.baseline, trainingSet$past.observed.topic)
+
+R2(testSet$avg.topic.baseline, testSet$past.observed.topic)
+cor(testSet$avg.topic.baseline, testSet$past.observed.topic)
+RMSE(testSet$avg.topic.baseline, testSet$past.observed.topic)
+plot(testSet$avg.topic.baseline, testSet$past.observed.topic)
+```
+
+
+###Linear regression
+https://datascienceplus.com/machine-learning-with-r-caret-part-1/
+```{r}
+trainSetLR=trainingSet
+trainSetLR$idAuthor.1=NULL
+trainSetLR$topic=NULL
+trainSetLR$avg.topic.baseline=NULL
+
+my_lm = caret::train(past.observed.topic ~ ., data = trainSetLR, method= "lm")
+
+#message("Linear Regression: Model performance on \n the training set")
+my_lm$results[c("RMSE","Rsquared")] %>% round(3)
+summary(my_lm)
+
+lr.pred.train=predict(my_lm)
+R2(lr.pred.train, trainingSet$past.observed.topic)
+cor(lr.pred.train, trainingSet$past.observed.topic)
+RMSE(lr.pred.train, trainingSet$past.observed.topic)
+plot(lr.pred.train, trainingSet$past.observed.topic)
+
+lr.pred.test=predict(my_lm, newdata = testSet)
+R2(lr.pred.test, testSet$past.observed.topic)
+cor(lr.pred.test, testSet$past.observed.topic)
+RMSE(lr.pred.test, testSet$past.observed.topic)
+plot(lr.pred.test, testSet$past.observed.topic)
+
+#validation with 2006 dataset
+lr.pred.2006test=predict(my_lm, newdata = finalResultsFromCFOnTestSet.casted)
+R2(lr.pred.2006test, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+cor(lr.pred.2006test, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+RMSE(lr.pred.2006test, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+plot(lr.pred.2006test, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+
+
+```
+
+###Decision tree
+```{r}
+#library(caret)
+library(rpart)
+trainSetRPart=trainingSet
+trainSetRPart$idAuthor.1=NULL
+trainSetRPart$topic=NULL
+trainSetRPart$avg.topic.baseline=NULL
+
+rpartTree <- rpart(past.observed.topic ~ ., data = trainSetRPart)
+#rpartTree$variable.importance
+
+#predict on trainning set
+rpart.predict.train=predict(rpartTree)
+R2(rpart.predict.train, trainSetRPart$past.observed.topic)
+cor(rpart.predict.train, trainSetRPart$past.observed.topic)
+RMSE(rpart.predict.train, trainSetRPart$past.observed.topic)
+plot(rpart.predict.train, trainSetRPart$past.observed.topic)
+
+#predict on test set
+rpart.predict.test=predict(rpartTree, newdata = testSet)
+R2(rpart.predict.test, testSet$past.observed.topic)
+cor(rpart.predict.test, testSet$past.observed.topic)
+RMSE(rpart.predict.test, testSet$past.observed.topic)
+plot(rpart.predict.test, testSet$past.observed.topic)
+
+#validation with 2006 dataset
+rpart.predict=predict(rpartTree, newdata = finalResultsFromCFOnTestSet.casted)
+R2(rpart.predict, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+cor(rpart.predict, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+RMSE(rpart.predict, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+plot(rpart.predict, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+
+```
+
+###Parallel Random Forest
+```{r}
+trainSetRF=trainingSet
+trainSetRF$idAuthor.1=NULL
+trainSetRF$topic=NULL
+trainSetRF$avg.topic.baseline=NULL
+
+
+rf.model.no.avg=ranger::ranger(past.observed.topic ~ ., data=trainSetRF, num.trees=500, num.threads=6, importance="impurity")
+
+R2(rf.model.no.avg$predictions, trainingSet$past.observed.topic)
+cor(rf.model.no.avg$predictions, trainingSet$past.observed.topic)
+RMSE(rf.model.no.avg$predictions, trainingSet$past.observed.topic)
+plot(rf.model.no.avg$predictions, trainingSet$past.observed.topic)
+
+rf.pred=predict(rf.model.no.avg, data = testSetRF)
+R2(rf.pred$predictions, testSetRF$past.observed.topic)
+cor(rf.pred$predictions, testSetRF$past.observed.topic)
+RMSE(rf.pred$predictions, testSetRF$past.observed.topic)
+plot(rf.pred$predictions, testSetRF$past.observed.topic)
+```
+
+
+##Avg CF data
+```{r}
+
+finalResultsFromAvgCF=readRDS("topic.predictions.for.authors.in.trainset.20190106.rds")
+
+finalResultsFromAvgCF.casted=dcast(finalResultsFromAvgCF, idAuthor.1+topic+past.observed.topic ~ relation, value.var = 'predic.topic.value')%>%as.data.frame(.)
+```
+
+
+###Correlation analysis
+on test set only
+```{r}
+library(corrplot)
+#add baseline from 
+finalResultsFromAvgCF.casted$baseline=avg.topic.baseline
+
+testAvgResult=finalResultsFromAvgCF.casted[-traningRows,]
+
+#change name one colum
+testAvgResult$observed.topic=testAvgResult$past.observed.topic
+testAvgResult$past.observed.topic=NULL
+
+
+correlations= cor(testAvgResult[,3:ncol(testAvgResult)])
+View(correlations)
+rmse.results=apply(testAvgResult[,4:ncol(testAvgResult)], MARGIN = 2, function(x){
+  RMSE(x, testAvgResult$past.observed.topic)
+})
+View(rmse.results)
+res1 <- cor.mtest(testAvgResult[,3:ncol(testAvgResult)], conf.level = .95)
+
+corrplot(correlations, method="color", type="full", order="original",
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE,
+         p.mat = res1$p, sig.level = .001,
+         number.cex = .7
+         )
+
+#plot of avg base on sim sem only
+cor(testAvgResult$past.observed.topic, testAvgResult$semantic.similarity)
+axisRange <- extendrange(c(testAvgResult$past.observed.topic, testAvgResult$semantic.similarity))
+plot(y=testAvgResult$semantic.similarity, x=testAvgResult$past.observed.topic, xlab="observed preferences", ylab="predicted preferences", xlim=axisRange, ylim=axisRange)
+abline(0, 1, col = "darkgrey", lty = 2)
+
+residualValues.rf <-  testAvgResult$past.observed.topic - testAvgResult$semantic.similarity
+plot(x = testAvgResult$semantic.similarity,  y=residualValues.rf, ylab  = "residual", xlab="predicted preferences")
+abline(h = 0,  col  = "darkgrey", lty = 2)
+
+
+
+```
+
+
+
+
+
+#Regression for future-prediction
+
+
+
+##read non-avg CF
+```{r}
+finalResultsFromCFOnTestSet=readRDS("non.averaged.topic.predictions.for.authors.in.testset.woth.rank.20190107.rds")
+
+finalResultsFromCFOnTestSet=readRDS("non.averaged.topic.predictions.for.authors.in.testsetFirstMonth.with.rank.20190109.rds")
+
+finalResultsFromCFOnTestSet.casted=dcast(finalResultsFromCFOnTestSet, idAuthor.1+topic+past.observed.topic+future.observed.topic ~ relation+rank, value.var = 'topic.value')%>%as.data.frame(.)
+
+
+```
+
+##Past preference as baseline
+correlation between past observed topic preference and future observed topic preference
+```{r}
+cor(finalResultsFromCFOnTestSet.casted$past.observed.topic, finalResultsFromCFOnTestSet.casted$future.observed.topic)
+
+```
+
+
+##split data
+```{r}
+library(caret)
+#table(dataForReg$hardAgreement)
+traningRows=caret::createDataPartition(y = finalResultsFromCFOnTestSet.casted$future.observed.topic, p = .66, list = F)
+trainingSet=finalResultsFromCFOnTestSet.casted[traningRows,]
+testSet=finalResultsFromCFOnTestSet.casted[-traningRows,]
+
+```
+###Linear regression
+https://datascienceplus.com/machine-learning-with-r-caret-part-1/
+```{r}
+trainSetLR=trainingSet
+trainSetLR$idAuthor.1=NULL
+trainSetLR$topic=NULL
+trainSetLR$past.observed.topic=NULL
+
+my_lm = caret::train(future.observed.topic ~ ., data = trainSetLR, method= "lm", preProc = c("center", "scale"))
+#message("Linear Regression: Model performance on \n the training set")
+my_lm$results[c("RMSE","Rsquared")] %>% round(3)
+summary(my_lm)
+
+lr.pred.train=predict(my_lm)
+R2(lr.pred.train, trainSetLR$future.observed.topic)
+cor(lr.pred.train, trainSetLR$future.observed.topic)
+RMSE(lr.pred.train, trainSetLR$future.observed.topic)
+plot(lr.pred.train, trainSetLR$future.observed.topic)
+
+lr.pred.test=predict(my_lm, newdata = testSet)
+R2(lr.pred.test, testSet$future.observed.topic)
+cor(lr.pred.test, testSet$future.observed.topic)
+RMSE(lr.pred.test, testSet$future.observed.topic)
+plot(lr.pred.test, testSet$future.observed.topic)
+
+```
+
+###Decision tree
+```{r}
+#library(caret)
+library(rpart)
+trainSetRPart=trainingSet
+trainSetRPart$idAuthor.1=NULL
+trainSetRPart$topic=NULL
+trainSetLR$past.observed.topic=NULL
+
+rpartTree <- rpart(future.observed.topic ~ ., data = trainSetRPart)
+#rpartTree$variable.importance
+
+#predict on trainning set
+rpart.predict.train=predict(rpartTree)
+R2(rpart.predict.train, trainSetRPart$future.observed.topic)
+cor(rpart.predict.train, trainSetRPart$future.observed.topic)
+RMSE(rpart.predict.train, trainSetRPart$future.observed.topic)
+#plot(rpart.predict.train, trainSetRPart$future.observed.topic)
+
+#predict on test set
+rpart.predict.test=predict(rpartTree, newdata = testSet)
+R2(rpart.predict.test, testSet$future.observed.topic)
+cor(rpart.predict.test, testSet$future.observed.topic)
+RMSE(rpart.predict.test, testSet$future.observed.topic)
+#plot(rpart.predict.test, testSet$future.observed.topic)
+
+```
+
+###Parallel Random Forest
+```{r}
+trainSetRF=trainingSet
+trainSetRF$idAuthor.1=NULL
+trainSetRF$topic=NULL
+trainSetRF$past.observed.topic=NULL
+
+#testSetRF=testSet
+#testSetRF$idAuthor.1=NULL
+#testSetRF$topic=NULL
+
+
+rf.model=ranger::ranger(future.observed.topic ~ ., data=trainSetRF, num.trees=500, num.threads=6)#, importance="impurity")
+
+
+R2(rf.model$predictions, trainingSet$future.observed.topic)
+cor(rf.model$predictions, trainingSet$future.observed.topic)
+RMSE(rf.model$predictions, trainingSet$future.observed.topic)
+#plot(rf.model$predictions, trainingSet$future.observed.topic)
+
+rf.pred=predict(rf.model, data = testSet)
+R2(rf.pred$predictions, testSet$future.observed.topic)
+cor(rf.pred$predictions, testSet$future.observed.topic)
+RMSE(rf.pred$predictions, testSet$future.observed.topic)
+#plot(rf.pred$predictions, testSet$future.observed.topic)
+```
+
+##Read avg data
+```{r}
+#version corrected
+finalResultsFromCF=readRDS("topic.predictions.20190106.rds") 
+
+
+#with one year future preference
+finalResultsFromCF.casted=dcast(finalResultsFromCF, idAuthor.1+topic+past.observed.topic+future.observed.topic ~ relation, value.var = 'predic.topic.value')%>%as.data.frame(.)
+#there is a NA colum that we need to remove
+#finalResultsFromCF.casted$'NA'=NULL
+
+
+```
+
+###Correlation analysis
+```{r}
+library(corrplot)
+finalResultsFromCF.casted=finalResultsFromCF.casted%>%as.data.frame(.)%>%extract(., 3:ncol(finalResultsFromCF.casted))
+correlations= cor(finalResultsFromCF.casted)
+corrplot(correlations, method="color", type="full", order="original",
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+
+```
+
+###correlation analysis on used topics only
+```{r}
+finalResultsFromCF.used=finalResultsFromCF[finalResultsFromCF$observed.topic>0.1,]
+finalResultsFromCF.casted=dcast(finalResultsFromCF, idAuthor.1+topic+past.observed.topic+future.observed.topic ~ relation, value.var = 'predic.topic.value')
+
+finalResultsFromCF.casted=finalResultsFromCF.casted%>%as.data.frame(.)%>%extract(., 3:ncol(finalResultsFromCF.casted))
+correlations= cor(finalResultsFromCF.casted)
+corrplot(correlations, method="color", type="full", order="original",
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+
+```

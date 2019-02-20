@@ -1,0 +1,438 @@
+---
+title: "CollaborativeFilteringCaculation"
+author: "Jean-Francois Chartier"
+date: "19 décembre 2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#install packages
+```{r}
+if ("quanteda" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(quanteda)
+if ("reshape2" %in% installed.packages()==FALSE){
+  install.packages('reshape2',dependencies = TRUE)
+}
+library(reshape2)
+if ("stringr" %in% installed.packages()==FALSE){
+  install.packages('stringr',dependencies = TRUE)
+}
+library(stringr)
+library(xml2)
+if ("magrittr" %in% installed.packages()==FALSE){
+  install.packages('magrittr',dependencies = TRUE)
+}
+library(magrittr)
+if ("topicmodels" %in% installed.packages()==FALSE){
+  install.packages('topicmodels',dependencies = TRUE)
+}
+library(topicmodels)
+if ("future.apply" %in% installed.packages()==FALSE){
+  install.packages('future.apply',dependencies = TRUE)
+}
+library(future.apply)
+if ("data.table" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(data.table)
+
+```
+
+
+#Load data
+```{r}
+centralityAuthors.T=readRDS("centralityAuthors.rds")
+posteriorTopicsForAuthors.T=readRDS("posteriorTopicsForAuthors.rds")
+relationsBetweenAuthors.T=readRDS("relationsBetweenAuthors.rds")
+trainTopicModelNyTimes.T=readRDS("trainTopicModelNyTimes.rds")
+authorFrequency.T=readRDS("authorFrequency.rds")
+myNyTimeTrainingMatrix=readRDS("myNyTimeTrainningMatrix.rds")
+```
+
+#Filter self-relation
+```{r}
+selfRelations=relationsBetweenAuthors.T[,1]==relationsBetweenAuthors.T[,2]
+relationsBetweenAuthors.noSelf=relationsBetweenAuthors.T[selfRelations==F,]
+```
+
+
+#Select K strongest relations
+```{r}
+plan(multiprocess, workers = 7)
+options(future.globals.maxSize= 996147200)
+k=10
+relationsTable <- as.data.table(relationsBetweenAuthors.noSelf)
+meltRelationsTable=data.table::melt(relationsTable,1:2, variable.name="relation")
+relationType=unique(meltRelationsTable$relation)
+future.apply::future_lapply(unique(relationsTable$idAuthor.1), FUN = function(author_i){
+  #author_i=98
+  lapply(relationType, function(rel){
+    current=meltRelationsTable[idAuthor.1==author_i & relation==rel]
+    current[order(current$value, decreasing = T)[1:k]]
+    })%>%rbindlist(.)
+})%>%rbindlist(.)->topKRelationsTable
+saveRDS(topKRelationsTable, file = "topKRelationsTable.rds")
+
+```
+
+
+#select k most important central agents
+```{r}
+#set how many agent to keep
+k=10
+centralitysTable <- as.data.table(centralityAuthors.T)
+meltCentralityTable=data.table::melt(centralitysTable,1, variable.name="centrality.type")
+#add key for further super fast subsetting
+setkey(meltCentralityTable, centrality.type, value)
+centralityType=unique(meltCentralityTable$centrality.type)
+uniqueAuthors=unique(meltCentralityTable$idAuthor)
+
+lapply(centralityType, function(rel){
+  #rel="degree.centrality"
+  #subset
+  topKid=meltCentralityTable[.(rel),]%>%tail(., k+1)
+  lapply(uniqueAuthors, function(idA){
+    #find self 
+    selfRelations=topKid$idAuthor==idA
+    #filter self
+    centralityAuthors.noSelf=topKid[selfRelations==F,]
+    #keep top k
+    centralityAuthors.noSelf=tail(centralityAuthors.noSelf, k)
+    data.table(idAuthor.1=rep(idA, k), idAuthor.2=centralityAuthors.noSelf$idAuthor, relation=centralityAuthors.noSelf$centrality.type, value=centralityAuthors.noSelf$value)
+  })%>%rbindlist(.)
+  
+})%>%rbindlist(.)->topKCentralityTable
+
+saveRDS(topKCentralityTable, file = "topKCentralityTable.rds")
+
+
+```
+
+
+
+#compute CF from k most strongest relations 
+
+```{r}
+topKRelationsTable=readRDS("topKRelationsTable.rds")
+topKCentralityTable=readRDS("topKCentralityTable.rds")
+
+#concat
+topKRelationsTable=rbind(topKRelationsTable, topKCentralityTable)
+
+idAuthorForTopic=rownames(posteriorTopicsForAuthors.T$topics)
+lapply(unique(topKRelationsTable$idAuthor.2), function(i){
+  #print(i)
+  #i=2910
+  #i=886
+  #i=2578
+  values=topKRelationsTable[idAuthor.2==i]
+  
+  sapply(posteriorTopicsForAuthors.T$topics[which(idAuthorForTopic==i),], function(t){
+    t*values$value
+  })->w
+  if (is.matrix(w)==F){
+    w=as.matrix(w)%>%t(.)%>%set_colnames(.,posteriorTopicsForAuthors.T$topics%>%colnames(.))
+  } else{
+    w=w%>%set_colnames(.,posteriorTopicsForAuthors.T$topics%>%colnames(.))
+    }
+  #w$topic.value=t
+  values=cbind(values, w)%>%melt(., id.vars=(1:4), variable.name="topic", value.name="topic.value")
+  
+})%>%rbindlist(.)->meltedResults
+
+saveRDS(meltedResults, "cf.melted.results.rds")
+
+```
+
+
+#Averaging topic.value by authors by type of relations
+```{r}
+predictions=dcast(meltedResults, idAuthor.1+relation ~ topic, fun.aggregate=mean, value.var = 'topic.value')
+saveRDS(predictions, file = "predictionsByRelationByTopic.rds")
+```
+
+#Collect Averaged CF results
+select only authors present in the test set 
+```{r}
+predictions=readRDS("predictionsByRelationByTopic.rds")
+posteriorForAuthorsTest=readRDS("posteriorTopicsForAuthorsTest-2019-01-04.rds")
+
+topic.predictions=melt(predictions, id.vars=(1:2), variable.name="topic", value.name="predic.topic.value")
+setkey(topic.predictions, idAuthor.1, topic)
+
+idAuthors.train=rownames(posteriorTopicsForAuthors.T$topics)
+idAuthors.test=rownames(posteriorForAuthorsTest$topics)
+#keep only author present in the prediction
+idAuthors.test=intersect(idAuthors.test,topic.predictions$idAuthor.1%>%unique(.))
+
+  
+lapply(1:ncol(posteriorForAuthorsTest$topics), function(topic_j){
+  #topic_j=100
+  
+  #select only authors from test set
+  lapply(idAuthors.test, function(idAuthor_i){
+    #topic_j=100
+    #author_i=886
+    v=posteriorTopicsForAuthors.T$topics[which(idAuthors.train==idAuthor_i), topic_j]
+    u=posteriorForAuthorsTest$topics[which(idAuthors.test==idAuthor_i), topic_j]
+    #get idAuthor
+    #idAuthor_i=rownames(posteriorTopicsForAuthors.T$topics)[author_i]
+    idTopic_j=colnames(posteriorTopicsForAuthors.T$topics)[topic_j]
+    
+    ij=topic.predictions[.(idAuthor_i, idTopic_j),]
+    #add past observed topic for author
+    ij$past.observed.topic=rep(v, nrow(ij))
+    ij$future.observed.topic=rep(u, nrow(ij))
+    ij
+  })%>%rbindlist(.)
+})%>%rbindlist(.)->topic.predictions
+
+finalResultsFromCF=topic.predictions
+saveRDS(finalResultsFromCF, "topic.predictions.20190106.rds")
+
+```
+
+#Collect Averaged CF results
+select all authors from train set 
+```{r}
+predictions=readRDS("predictionsByRelationByTopic.rds")
+#posteriorForAuthorsTest=readRDS("posteriorTopicsForAuthorsTest-2019-01-04.rds")
+
+topic.predictions=melt(predictions, id.vars=(1:2), variable.name="topic", value.name="predic.topic.value")
+setkey(topic.predictions, idAuthor.1, topic)
+
+lapply(1:ncol(posteriorTopicsForAuthors.T$topics), function(topic_j){
+  #topic_j=100
+  idAuthors.train=rownames(posteriorTopicsForAuthors.T$topics)
+  
+  #select all authors from train set
+  lapply(idAuthors.train, function(idAuthor_i){
+    #topic_j=100
+    #author_i=886
+    v=posteriorTopicsForAuthors.T$topics[which(idAuthors.train==idAuthor_i), topic_j]
+    
+    #v=posteriorTopicsForAuthors.T$topics[author_i, topic_j]
+    #u=posteriorForAuthorsTest$topics[author_i, topic_j]
+    #get idAuthor
+    #idAuthor_i=rownames(posteriorTopicsForAuthors.T$topics)[author_i]
+    idTopic_j=colnames(posteriorTopicsForAuthors.T$topics)[topic_j]
+    
+    ij=topic.predictions[.(idAuthor_i, idTopic_j),]
+    #add past observed topic for author
+    ij$past.observed.topic=rep(v, nrow(ij))
+    #ij$future.observed.topic=rep(u, nrow(ij))
+    ij
+  })%>%rbindlist(.)
+})%>%rbindlist(.)->topic.predictions
+
+finalResultsFromCF=topic.predictions
+saveRDS(finalResultsFromCF, "topic.predictions.for.authors.in.trainset.20190106.rds")
+
+```
+
+#Collect non-averaged CF results
+select all authors from train set 
+replace idAuthor.2 by k1,k2...k10. 
+The idea here is to replace the summation function of CF by a learner
+```{r}
+meltedResults=readRDS("cf.melted.results.rds")
+#sort
+setkey(meltedResults, idAuthor.1, relation, topic, value)
+#replace idAuthor.2 by k1,k2...k10
+k=10
+rankId=lapply(1:k, function(x){
+  abs(x-k)+1
+})
+#replicate rank for all relationType (7) and topics (200)
+nRelType=meltedResults$relation%>%unique(.)%>%length(.)
+nTopics=meltedResults$topic%>%unique(.)%>%length(.)
+rankId=rep(rankId, (nRelType*nTopics))%>%unlist(.)
+
+lapply(meltedResults$idAuthor.1%>%unique(.), function(id1_i){
+  #id1_i="292"
+  id1=meltedResults[.(id1_i),]
+  id1$rank=rankId
+  id1
+})%>%rbindlist(.)->meltedResultsWithRank
+
+topic.predictions=meltedResultsWithRank
+setkey(topic.predictions, idAuthor.1, topic)
+
+lapply(1:ncol(posteriorTopicsForAuthors.T$topics), function(topic_j){
+  #topic_j=100
+  idAuthors.train=rownames(posteriorTopicsForAuthors.T$topics)
+  
+  #select all authors from train set
+  lapply(idAuthors.train, function(idAuthor_i){
+    #topic_j=100
+    #author_i=886
+    v=posteriorTopicsForAuthors.T$topics[which(idAuthors.train==idAuthor_i), topic_j]
+    
+    #v=posteriorTopicsForAuthors.T$topics[author_i, topic_j]
+    #u=posteriorForAuthorsTest$topics[author_i, topic_j]
+    #get idAuthor
+    #idAuthor_i=rownames(posteriorTopicsForAuthors.T$topics)[author_i]
+    idTopic_j=colnames(posteriorTopicsForAuthors.T$topics)[topic_j]
+    
+    ij=topic.predictions[.(idAuthor_i, idTopic_j),]
+    #add past observed topic for author
+    ij$past.observed.topic=rep(v, nrow(ij))
+    #ij$future.observed.topic=rep(u, nrow(ij))
+    ij
+  })%>%rbindlist(.)
+})%>%rbindlist(.)->topic.predictions
+
+finalResultsFromCF=topic.predictions
+saveRDS(finalResultsFromCF, "non.averaged.topic.predictions.for.authors.in.trainset.woth.rank.20190107.rds")
+
+```
+
+#Collect non-averaged CF results for test set
+select all authors from TEST set 
+replace idAuthor.2 by k1,k2...k10. 
+The idea here is to replace the summation function of CF by a learner
+```{r}
+#posteriorForAuthorsTest=readRDS("posteriorTopicsForAuthorsTest-2019-01-04.rds")
+
+#read data for only the first month of 2006
+posteriorForAuthorsTest=readRDS("posteriorTopicsForFirstMonthAuthorsTest-2019-01-09.rds")
+
+meltedResults=readRDS("cf.melted.results.rds")
+#sort
+setkey(meltedResults, idAuthor.1, relation, topic, value)
+#replace idAuthor.2 by k1,k2...k10
+k=10
+rankId=lapply(1:k, function(x){
+  abs(x-k)+1
+})
+#replicate rank for all relationType (7) and topics (200)
+nRelType=meltedResults$relation%>%unique(.)%>%length(.)
+nTopics=meltedResults$topic%>%unique(.)%>%length(.)
+rankId=rep(rankId, (nRelType*nTopics))%>%unlist(.)
+
+lapply(meltedResults$idAuthor.1%>%unique(.), function(id1_i){
+  #id1_i="292"
+  id1=meltedResults[.(id1_i),]
+  id1$rank=rankId
+  id1
+})%>%rbindlist(.)->meltedResultsWithRank
+
+topic.predictions=meltedResultsWithRank
+setkey(topic.predictions, idAuthor.1, topic)
+
+idAuthors.train=rownames(posteriorTopicsForAuthors.T$topics)
+idAuthors.test=rownames(posteriorForAuthorsTest$topics)
+#keep only author present in the prediction
+idAuthors.test=intersect(idAuthors.test,topic.predictions$idAuthor.1%>%unique(.))
+
+  
+lapply(1:ncol(posteriorForAuthorsTest$topics), function(topic_j){
+  #topic_j=100
+  
+  #select only authors from test set
+  lapply(idAuthors.test, function(idAuthor_i){
+    #topic_j=100
+    #author_i=886
+    v=posteriorTopicsForAuthors.T$topics[which(idAuthors.train==idAuthor_i), topic_j]
+    u=posteriorForAuthorsTest$topics[which(idAuthors.test==idAuthor_i), topic_j]
+    #get idAuthor
+    #idAuthor_i=rownames(posteriorTopicsForAuthors.T$topics)[author_i]
+    idTopic_j=colnames(posteriorTopicsForAuthors.T$topics)[topic_j]
+    
+    ij=topic.predictions[.(idAuthor_i, idTopic_j),]
+    #add past observed topic for author
+    ij$past.observed.topic=rep(v, nrow(ij))
+    ij$future.observed.topic=rep(u, nrow(ij))
+    ij
+  })%>%rbindlist(.)
+})%>%rbindlist(.)->topic.predictions
+
+finalResultsFromCF=topic.predictions
+#saveRDS(finalResultsFromCF, "non.averaged.topic.predictions.for.authors.in.testset.woth.rank.20190107.rds")
+
+saveRDS(finalResultsFromCF, "non.averaged.topic.predictions.for.authors.in.testsetFirstMonth.with.rank.20190109.rds")
+
+```
+
+##Collect non-averaged CF results
+select all authors from train set 
+not sure how to use it
+```{r}
+#predictions=readRDS("predictionsByRelationByTopic.rds")
+meltedResults=readRDS("cf.melted.results.rds")
+#posteriorForAuthorsTest=readRDS("posteriorTopicsForAuthorsTest-2019-01-04.rds")
+
+topic.predictions=meltedResults
+setkey(topic.predictions, idAuthor.1, topic)
+
+lapply(1:ncol(posteriorTopicsForAuthors.T$topics), function(topic_j){
+  #topic_j=100
+  idAuthors.train=rownames(posteriorTopicsForAuthors.T$topics)
+  
+  #select all authors from train set
+  lapply(idAuthors.train, function(idAuthor_i){
+    #topic_j=100
+    #author_i=886
+    v=posteriorTopicsForAuthors.T$topics[which(idAuthors.train==idAuthor_i), topic_j]
+    
+    #v=posteriorTopicsForAuthors.T$topics[author_i, topic_j]
+    #u=posteriorForAuthorsTest$topics[author_i, topic_j]
+    #get idAuthor
+    #idAuthor_i=rownames(posteriorTopicsForAuthors.T$topics)[author_i]
+    idTopic_j=colnames(posteriorTopicsForAuthors.T$topics)[topic_j]
+    
+    ij=topic.predictions[.(idAuthor_i, idTopic_j),]
+    #add past observed topic for author
+    ij$past.observed.topic=rep(v, nrow(ij))
+    #ij$future.observed.topic=rep(u, nrow(ij))
+    ij
+  })%>%rbindlist(.)
+})%>%rbindlist(.)->topic.predictions
+
+finalResultsFromCF=topic.predictions
+saveRDS(finalResultsFromCF, "non.averaged.topic.predictions.for.authors.in.trainset.20190106.rds")
+
+```
+
+
+#Collect Averaged CF results (old)
+old one without future prediction
+```{r}
+predictions=readRDS("predictionsByRelationByTopic.rds")
+posteriorForAuthorsTest=readRDS("posteriorTopicsForAuthorsTest-2019-01-04.rds")
+
+topic.predictions=melt(predictions, id.vars=(1:2), variable.name="topic", value.name="predic.topic.value")
+setkey(topic.predictions, idAuthor.1, topic)
+
+lapply(1:ncol(posteriorTopicsForAuthors.T$topics), function(topic_j){
+  #topic_j=100
+  lapply(1:nrow(posteriorTopicsForAuthors.T$topics), function(author_i){
+    #topic_j=100
+    #author_i=886
+    v=posteriorTopicsForAuthors.T$topics[author_i, topic_j]
+    u=posteriorForAuthorsTest$topics[author_i, topic_j]
+    #get idAuthor
+    idAuthor_i=rownames(posteriorTopicsForAuthors.T$topics)[author_i]
+    idTopic_j=colnames(posteriorTopicsForAuthors.T$topics)[topic_j]
+    
+    ij=topic.predictions[.(idAuthor_i, idTopic_j),]
+    #add past observed topic for author
+    ij$past.observed.topic=rep(v, nrow(ij))
+    ij$futur.observed.topic=rep(u, nrow(ij))
+    ij
+  })%>%rbindlist(.)
+})%>%rbindlist(.)->topic.predictions
+
+finalResultsFromCF=topic.predictions
+saveRDS(finalResultsFromCF, "topic.predictions.rds")
+
+```
+

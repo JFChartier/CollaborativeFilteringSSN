@@ -1,0 +1,265 @@
+---
+title: "PreprocessingNYTimeTestSetForCF"
+author: "Jean-Francois Chartier"
+date: "2018 december 28"
+output: 
+  html_document:
+    number_sections: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, cache.lazy = FALSE)
+```
+
+
+#install packages
+```{r}
+if ("quanteda" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(quanteda)
+if ("reshape2" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(reshape2)
+if ("stringr" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(stringr)
+if ("xml2" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(xml2)
+if ("magrittr" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(magrittr)
+if ("topicmodels" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(topicmodels)
+if ("proxy" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(proxy)
+library(igraph)
+if ("data.table" %in% installed.packages()==FALSE){
+  install.packages('quanteda',dependencies = TRUE)
+}
+library(data.table)
+
+```
+
+
+#Load data
+```{r}
+centralityAuthors.T=readRDS("centralityAuthors.rds")
+posteriorTopicsForAuthors.T=readRDS("posteriorTopicsForAuthors.rds")
+relationsBetweenAuthors.T=readRDS("relationsBetweenAuthors.rds")
+trainTopicModelNyTimes.T=readRDS("trainTopicModelNyTimes.rds")
+authorFrequency.T=readRDS("authorFrequency.rds")
+myNyTimeTrainingMatrix=readRDS("myNyTimeTrainningMatrix.rds")
+```
+
+#get documents
+```{r}
+#library(xml2)
+#library(magrittr)
+
+nyXML=xml2::read_xml("NY_TimeCorpus2006_Avecauteur_LemmatiserFiltrerToutSaufNomAdjVerbe_formatJFC.xml", encoding="ANSI")
+all.docs.nodes=xml_find_all(nyXML, ".//document")
+
+#subset for testing the script
+#all.docs.nodes=all.docs.nodes[1:1000]
+
+```
+
+
+##get authors
+all unique authors
+id rows are used as id authors
+```{r}
+#important de concat author names
+#
+authorFrequency=xml2::xml_find_all(all.docs.nodes, ".//auteur")%>%xml_text(.)%>%table(.)%>%as.data.frame(., stringsAsFactors=F)%>% set_colnames(., c("author.name", "frequency"))
+
+#keep only authors present in the trainning set
+retainedAuthors=sapply(authorFrequency.T$author.name, function(x){
+  x%in% authorFrequency$author.name
+})
+authorFrequency=authorFrequency.T[retainedAuthors,]
+uniqueAuthors=authorFrequency$author.name
+
+```
+
+##get id authors by document
+```{r}
+#paralle lapply does not work here
+#library(future.apply)
+#plan(multiprocess, workers = 6)
+
+allIdAuthorsByDoc=sapply(all.docs.nodes, FUN = function(x){
+  authors_i= xml2::xml_find_all(x, ".//auteur")
+  if (length(authors_i)>0){
+    lapply(authors_i, function(y){
+      a=xml_text(y) 
+      authorFrequency$idAuthor[authorFrequency$author.name==a]
+    })
+  }
+  else{
+    list()
+  }
+})
+
+
+```
+
+##Subset indexed document with authors
+keep only doc with indexed authors. In other words, empty list (with no attributed idAutor) are filtered out
+```{r}
+idsT=sapply(allIdAuthorsByDoc, function(x) length(unlist(x))>0)
+allIdAuthorsByDoc=allIdAuthorsByDoc[idsT]
+all.docs.nodes=all.docs.nodes[idsT]
+```
+
+
+##get info from documents
+```{r}
+
+allSeg=lapply(all.docs.nodes, FUN = function(x){
+  seg_i = x %>% xml2::xml_find_first(., ".//segment")%>%xml_text(.)
+})%>%unlist(.)
+
+allDate=lapply(all.docs.nodes, FUN = function(x){
+  date_i= x %>% xml2::xml_find_first(., ".//date")%>%xml_integer(.)
+})%>%unlist(.)
+
+df.docs=data.frame(segment = allSeg, date =  allDate, stringsAsFactors = F)
+df.docs$idAuthors=allIdAuthorsByDoc
+```
+
+###save intermediate results
+```{r}
+saveRDS(df.docs, "df.docs.withRawTextAndInfo.rds")
+```
+
+
+###subset of first month
+```{r}
+df.docs=readRDS("df.docs.withRawTextAndInfo.rds")
+
+maxDate=20060200
+df.docs=df.docs[df.docs$date<maxDate,]
+
+```
+
+#Preprocessing data
+
+##cleaning corpus
+```{r}
+#library(stringr)
+# tokenisation selon quanteda
+preprocesCorpus=stringr::str_replace_all(df.docs$segment,"[\r\n]" , "")
+#remove all non graphical caracther
+preprocesCorpus=stringr::str_replace_all(preprocesCorpus,"[^[:graph:]]", " ")
+#remove whitespace
+preprocesCorpus=stringr::str_squish(preprocesCorpus)
+```
+
+##Tokinization and word filtering
+```{r}
+#library(quanteda)
+
+preprocesCorpus=quanteda::tokens(x=preprocesCorpus,what="word", remove_punct = TRUE, remove_numbers = TRUE, remove_separators = TRUE,remove_hyphens = TRUE, remove_symbols=TRUE, remove_url = TRUE)
+
+preprocesCorpus=quanteda::tokens_tolower(preprocesCorpus)
+
+wordsFromTrainCorpus=myNyTimeTrainingMatrix@Dimnames$features
+
+# filtrer selon un antidictionnaire et singleton
+preprocesCorpus=quanteda::tokens_keep(preprocesCorpus, case_insensitive = F, valuetype = "glob", pattern=wordsFromTrainCorpus)
+
+print(c("vocabulary size after preprocessing : ", length(unique(paste(unlist(preprocesCorpus))) )))
+df.docs$tokens=preprocesCorpus
+```
+
+
+#Modeling 
+##vectorization of documents
+```{r ,cache=T}
+#Vectorize documents 
+myNyTimeMatrixTest = quanteda::dfm(x=df.docs$tokens, tolower=FALSE)
+myNyTimeMatrixTest = quanteda::dfm_select(myNyTimeMatrixTest, myNyTimeTrainingMatrix)
+
+# imprimer nombre de dimensions de la matrice
+print(paste("nombre de mots differents apres filtrage base sur la frequence documentaire : ", length(myNyTimeMatrixTest@Dimnames$features)))
+
+#saveRDS(myNyTimeMatrixTest, "myNyTimeTestMatrix.rds")
+
+#saveRDS(myNyTimeMatrixTest, "myNyTimeTestOneMonthMatrix.rds")
+
+```
+
+##filter empty documents
+
+```{r}
+#myNyTimeMatrixTest=readRDS("myNyTimeTestMatrix.rds")
+
+nonEmptyVectors=quanteda::rowSums(myNyTimeMatrixTest)>0
+#old very unoptimized solution
+#nonEmptyVectors = apply(X = as.matrix(myNyTimeMatrixTest), MARGIN = 1, FUN = function(x) sqrt(sum(x^2))>0)
+myNyTimeMatrixTest=myNyTimeMatrixTest[nonEmptyVectors,]
+df.docs=df.docs[nonEmptyVectors,]
+
+```
+
+##Save test set Info Data Frame
+```{r}
+saveRDS(df.docs, "nyTimeTestSetInfoDataFrame.rds")
+```
+
+
+
+#Journalists' semantic preferences
+
+
+##aggregate to journalist*word matrix
+```{r}
+#df.docs=readRDS("nyTimeTestSetInfoDataFrame.rds")
+
+docAuthorAdjencency = quanteda::dfm(x=df.docs$idAuthors %>% as.tokens(.), tolower=FALSE)
+
+authorWordTFMatrix=matrix(nrow = ncol(docAuthorAdjencency), ncol = ncol(myNyTimeMatrixTest))
+#rownames are id authors 
+# important here to select from docAuthorAdjencency, because after filtering empty segment, we have authors in the corpus who are never instanciated in the matrix 
+rownames(authorWordTFMatrix)=colnames(docAuthorAdjencency)
+for (j in 1: ncol(docAuthorAdjencency)){
+  idDocs=which((docAuthorAdjencency)[,j]%>%as.matrix()>0)
+  myNyTimeMatrixTest[idDocs,] %>% colSums(.)->authorWordTFMatrix[j,]
+}
+
+```
+
+##Topic a posteriori of journalists
+```{r}
+
+posteriorForAuthorsTest=topicmodels::posterior(trainTopicModelNyTimes.T, newdata = authorWordTFMatrix)
+
+saveRDS(posteriorForAuthorsTest, "posteriorTopicsForFirstMonthAuthorsTest-2019-01-09.rds")
+
+#saveRDS(posteriorForAuthorsTest, "posteriorTopicsForAuthorsTest-2019-01-04.rds")
+
+#plot(posteriorTopicsForAuthors.T$topics[i,], type = "l")
+#plot(posteriorForAuthorsTest$topics[1,], type = "l")
+
+```
+
+
+
+
+
+
